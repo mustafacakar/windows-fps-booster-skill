@@ -33,16 +33,43 @@ $bb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS
 
 Section 'GPU'
 Get-CimInstance Win32_VideoController | ForEach-Object {
-  "$($_.Name)  driver=$($_.DriverVersion) driverDate=$(if ($_.DriverDate) { $_.DriverDate.ToString('yyyy-MM-dd') })  res=$($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)  refreshNow=$($_.CurrentRefreshRate)Hz refreshMax=$($_.MaxRefreshRate)Hz"
+  "$($_.Name)  driver=$($_.DriverVersion) driverDate=$(if ($_.DriverDate) { $_.DriverDate.ToString('yyyy-MM-dd') })  VRAM_GB=$([math]::Round($_.AdapterRAM/1GB,1)) (WMI caps at 4)"
 }
 
 Section 'Monitors'
 Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID | ForEach-Object {
   (($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join '')
 }
+"(Names above are not guaranteed to be in the same order as the displays below.)"
 Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Screen]::AllScreens | ForEach-Object { "$($_.DeviceName) primary=$($_.Primary) $($_.Bounds.Width)x$($_.Bounds.Height)" }
-"Note: refreshMax above is reported by the driver for the primary adapter output; confirm per monitor in Settings > Display > Advanced display."
+Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class FpsBoosterDisplay {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)] public struct DEVMODE {
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmDeviceName;
+    public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+    public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string dmFormName;
+    public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency; }
+  [DllImport("user32.dll", CharSet=CharSet.Ansi)] public static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+}
+"@
+$rates = @()
+foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+  $dm = New-Object FpsBoosterDisplay+DEVMODE; $dm.dmSize = [Runtime.InteropServices.Marshal]::SizeOf($dm)
+  [void][FpsBoosterDisplay]::EnumDisplaySettings($s.DeviceName, -1, [ref]$dm)
+  $w = $dm.dmPelsWidth; $h = $dm.dmPelsHeight; $now = $dm.dmDisplayFrequency
+  $max = 0; $i = 0
+  while ([FpsBoosterDisplay]::EnumDisplaySettings($s.DeviceName, $i, [ref]$dm)) {
+    if ($dm.dmPelsWidth -eq $w -and $dm.dmPelsHeight -eq $h -and $dm.dmDisplayFrequency -gt $max) { $max = $dm.dmDisplayFrequency }
+    $i++
+  }
+  $rates += $now
+  $flag = if ($max -gt $now) { '  <-- can go higher' } else { '' }
+  "$($s.DeviceName) primary=$($s.Primary) ${w}x${h} refreshNow=${now}Hz refreshMax=${max}Hz$flag"
+}
+if (($rates | Select-Object -Unique).Count -gt 1) { "Mixed refresh rates across monitors: on Windows 10, video playing on the slower screen can cause in-game stutter." }
+"refreshMax = highest rate Windows offers at the current resolution (cable/port limits apply)."
 
 Section 'Disks'
 $phys = @(Get-PhysicalDisk)
